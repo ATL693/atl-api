@@ -406,11 +406,16 @@ async function getBillstackKey(env) { return (await getBillstackKeys(env))[0] ||
 /* ---------- DEPOSIT ACCOUNTS (BillStack reserved virtual accounts, one per bank) ---------- */
 const BS_BANKS = { "9PSB": "9PSB Bank", SAFEHAVEN: "Safehaven MFB", PROVIDUS: "Providus Bank", PALMPAY: "PalmPay" };
 const slug = (v) => String(v || "").replace(/[^a-zA-Z0-9_-]/g, "").slice(0, 120);
-// Banks come from the admin panel (config/payment.billstack.banks). Nothing to edit here when the admin changes them.
+// Banks come from the admin panel > Wallet Funding (config/payment.fundingMethods). Nothing to edit here when the admin changes them.
+const FUND_MAP = { billStack9psb: "9PSB", palmpayBillStack: "PALMPAY", safeHavenBillStack: "SAFEHAVEN" };
 function enabledBanks(payCfg) {
-  const b = (payCfg.billstack || {}).banks;
-  let list = Array.isArray(b) ? b : typeof b === "string" ? b.split(",") : [];
-  list = list.map((x) => String(x).trim().toUpperCase()).filter((x) => BS_BANKS[x]);
+  const fm = payCfg.fundingMethods;
+  let list = [];
+  if (fm && typeof fm === "object") list = Object.keys(FUND_MAP).filter((k) => fm[k] === true).map((k) => FUND_MAP[k]);
+  else {                                                   // older setting: billstack.banks
+    const b = (payCfg.billstack || {}).banks;
+    list = (Array.isArray(b) ? b : typeof b === "string" ? b.split(",") : []).map((x) => String(x).trim().toUpperCase()).filter((x) => BS_BANKS[x]);
+  }
   if (!list.length) list = [BANK_CODES[payCfg.defaultBank] || "9PSB"];
   return [...new Set(list)];
 }
