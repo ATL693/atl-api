@@ -6,7 +6,7 @@ const PROJECT = "a-t-l-data";
 const ADMIN_EMAIL = "lawanahmadt03@gmail.com";
 const SERVICE_IDS = { mtn: 87, airtel: 159, glo: 157, "9mobile": 252 };   // VTUGate
 const AIRTIME_IDS = { mtn: 58, airtel: 312, glo: 243, "9mobile": 244 };   // VTUGate
-const ST_NET = { mtn: 1, glo: 2, "9mobile": 3, airtel: 4 };               // Smartteck network ids
+const ST_NET = { mtn: 1, airtel: 2, glo: 3, "9mobile": 4 };               // Smartteck network ids
 const DISCOS = { 1: "Ikeja Electric", 2: "Eko Electric", 3: "Abuja Electric", 4: "Kano Electric", 5: "Enugu Electric", 6: "Port Harcourt Electric", 7: "Ibadan Electric", 8: "Kaduna Electric", 9: "Jos Electric", 10: "Benin Electric", 11: "Yola Electric" };
 const BANK_CODES = { "9PSB Bank": "9PSB", "9PSB WAAS": "9PSB" };          // add more only after BillStack confirms the codes
 const CORS = {
@@ -583,7 +583,7 @@ async function debugNetworks(env) {
   if (!useST(s)) return json({ vendor: "not smartteck" });
   const r = await stCall(s, "GET", "/api/data_plans");
   const list = r.ok && r.data && Array.isArray(r.data.mobile_networks)
-    ? r.data.mobile_networks.map((n) => ({ name: n.name, id: vendorNetId(n) || null, data_active: n.data_active, fields: Object.keys(n).filter((k) => typeof n[k] !== "object").slice(0, 12) })) : [];
+    ? r.data.mobile_networks.map((n) => ({ name: n.name, id: vendorNetId(n) || null, data_active: n.data_active, code: n.code, api_network_id: n.api_network_id, fields: Object.keys(n).filter((k) => typeof n[k] !== "object").slice(0, 12) })) : [];
   return json({ http: r.httpStatus, vendor_networks: list, built_in_fallback: ST_NET, in_use: await stNetIds(s).catch(() => ({})) });
 }
 
