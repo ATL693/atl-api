@@ -60,7 +60,7 @@ export default {
         }
         const r = await vtugateRaw(env, "/api/v1/accountdetails", new URLSearchParams());
         const d = r.data && r.data.data;
-        if (!r.ok || !d) return json({ status: false, message: "Unable to fetch VTUGate balance" }, r.httpStatus || 502);
+        if (!r.ok || !d) return json({ status: false, message: "Unable to fetch VTUGate balance", reason: String(r.error || (r.data && (r.data.message || r.data.error)) || ("VTUGate replied with code " + r.httpStatus)).slice(0, 160) }, r.httpStatus || 502);
         return json({ status: true, wallet_balance: Number(d.wallet_balance || 0), account_status: d.account_status || "" });
       }
       if (p === "/account/create" && m === "POST") return await createDepositAccount(request, env);
@@ -197,13 +197,16 @@ async function checkPin(user, uid, pin) {
   if (h !== user.pinHash) return { ok: false, message: "Incorrect PIN." };
   return { ok: true };
 }
-async function authUser(request) {
+async function authUser(request, env) {
   const tk = (request.headers.get("Authorization") || "").replace(/^Bearer /, "");
   const u = tk ? await verifyIdToken(tk).catch(() => null) : null;
-  return u && u.email_verified === true ? u : null;
+  if (!u) return null;
+  if (u.email_verified === true) return u;
+  if (env) { const d = await fsGet(env, "users/" + u.sub).catch(() => null); if (d && d.adminVerified === true) return u; }   // verified by the admin
+  return null;
 }
 async function gate(request, env, s, svc, pin) {
-  const u = await authUser(request);
+  const u = await authUser(request, env);
   if (!u) return { res: json({ status: false, message: "Please login again." }, 401) };
   const user = await fsGet(env, "users/" + u.sub);
   if (!user) return { res: json({ status: false, message: "Account not found." }, 404) };
@@ -305,7 +308,7 @@ function meterInput(x) {
   return DISCOS[id] && /^\d{6,13}$/.test(no) && (type === "prepaid" || type === "postpaid") ? { id, no, type } : null;
 }
 async function validateMeterRoute(request, env, url) {
-  if (!(await authUser(request))) return json({ status: false, message: "Please login again." }, 401);
+  if (!(await authUser(request, env))) return json({ status: false, message: "Please login again." }, 401);
   const s = await settings(env);
   if (!useST(s)) return json({ status: false, message: "Electricity is not available right now." }, 503);
   const m = meterInput(Object.fromEntries(url.searchParams));
@@ -420,20 +423,27 @@ function enabledBanks(payCfg) {
   return [...new Set(list)];
 }
 async function bsCreate(bsKey, user, uid, bank, id) {
-  const name = String(user.name || "Customer User").trim().split(/\s+/);
+  let name = String(user.name || "Customer User").trim().split(/\s+/);
+  if (bank === "PALMPAY" && id.first) name = [id.first].concat(String(id.last || "").trim() ? [id.last] : []);
   const body = {
     reference: uid + "_" + bank.toLowerCase() + "_" + crypto.randomUUID().slice(0, 6), email: user.email || "",
     phone: String(user.phone || "08000000000").replace(/\D/g, "").slice(0, 11) || "08000000000",
-    firstName: name[0] || "Customer", lastName: name.slice(1).join(" ") || "User", bank
+    firstName: name[0] || "Customer", lastName: name.slice(1).join(" ") || (bank === "PALMPAY" ? name[0] : "User"), bank
   };
   if (bank === "PALMPAY") { body.idType = id.type; body.idNumber = id.number; }
-  let d;
+  let d, http = 0;
   try {
     const r = await fetch(BILLSTACK_BASE + "/thirdparty/generateVirtualAccount/", { method: "POST", headers: { "Content-Type": "application/json", Authorization: "Bearer " + bsKey }, body: JSON.stringify(body) });
-    d = await r.json().catch(() => null);
+    http = r.status; d = await r.json().catch(() => null);
   } catch (e) { return { ok: false, message: "Could not reach the deposit provider." }; }
   const acc = d && d.status && d.data && d.data.account && d.data.account[0];
-  if (!acc) return { ok: false, message: String((d && d.message) || "Could not create the account.").slice(0, 160) };
+  if (!acc) {
+    const pick = (x) => (x == null ? "" : typeof x === "string" ? x : Array.isArray(x) ? x.map(pick).filter(Boolean).join("; ") : typeof x === "object" ? Object.values(x).map(pick).filter(Boolean).join("; ") : String(x));
+    let msg = pick(d && (d.message || d.error || d.errors || (d.data && d.data.message))).trim();
+    if (d && d.status && !msg) msg = "The bank is still preparing this account. Try again in a minute.";
+    console.log("BILLSTACK " + bank + " failed: http " + http + " | " + msg.slice(0, 200));      // no NIN/BVN is logged
+    return { ok: false, message: (msg || "Could not create the account.").slice(0, 200) + (http && http !== 200 ? " (code " + http + ")" : "") };
+  }
   const ref = String((d.data && d.data.reference) || acc.reference || acc.account_reference || acc.customer_reference || "");
   return { ok: true, reqRef: body.reference, ref, acc: { bank_id: String(acc.bank_id || bank), bank_name: String(acc.bank_name || BS_BANKS[bank]), account_number: String(acc.account_number), account_name: String(acc.account_name || ""), reference: ref } };
 }
@@ -443,9 +453,10 @@ async function bsKyc(bsKey, email, bvn) {   // best effort: ties the BVN to ever
 async function createDepositAccount(request, env) {
   const tk = (request.headers.get("Authorization") || "").replace(/^Bearer /, "");
   const u = tk ? await verifyIdToken(tk).catch(() => null) : null;
-  if (!u || u.email_verified !== true) return json({ status: false, message: "Please login again." }, 401);
+  if (!u) return json({ status: false, message: "Please login again." }, 401);
   const user = await fsGet(env, "users/" + u.sub);
   if (!user) return json({ status: false, message: "Account not found." }, 404);
+  if (u.email_verified !== true && user.adminVerified !== true) return json({ status: false, message: "Please verify your email first." }, 403);
 
   const payCfg = (await fsGet(env, "config/payment").catch(() => null)) || {};
   const banks = enabledBanks(payCfg);
@@ -472,7 +483,8 @@ async function createDepositAccount(request, env) {
       else {
         for (const bank of missing) {
           if (bank === "PALMPAY" && !haveId) { needsId = true; continue; }
-          const r = await bsCreate(bsKey, user, u.sub, bank, { type: idType, number: idNumber });
+          const nm = (v) => String(v || "").replace(/[^A-Za-z\-' ]/g, "").trim().slice(0, 40);
+          const r = await bsCreate(bsKey, user, u.sub, bank, { type: idType, number: idNumber, first: nm(b.firstName), last: nm(b.lastName) });
           if (!r.ok) { errors[bank] = r.message; continue; }
           newOnes.push(r.acc); accounts.push(r.acc);
           for (const k of [slug(r.ref), slug(r.reqRef)]) if (k) writes.push(put("baRefs/" + k, { uid: u.sub, bank }));
@@ -492,11 +504,14 @@ async function createDepositAccount(request, env) {
     await commitWrites(env, writes);
   }
   if (!accounts.length) return json({ status: false, message: Object.values(errors)[0] || "Could not create your deposit account." }, 502);
-  const f = accounts[0];
+  let shown = accounts.filter((a) => banks.includes(a.bank_id)); if (!shown.length) shown = accounts;
+  const f = shown[0];
   return json({ status: true, message: "Accounts ready.", data: {
     account_number: f.account_number, account_name: f.account_name, bank_name: f.bank_name,      // (older app versions read these)
-    accounts: accounts.map((a) => ({ bank_id: a.bank_id, bank_name: a.bank_name, account_number: a.account_number, account_name: a.account_name })),
-    needs_id: needsId, errors, banks
+    accounts: shown.map((a) => ({ bank_id: a.bank_id, bank_name: a.bank_name, account_number: a.account_number, account_name: a.account_name })),
+    needs_id: needsId, errors, banks,
+    methods: (() => { const fm = payCfg.fundingMethods; const m = {}; if (fm && typeof fm === "object") for (const k of Object.keys(fm)) m[k] = fm[k] !== false; return m; })(),
+    default_provider: String(payCfg.defaultFundingProvider || "")
   } });
 }
 
@@ -790,7 +805,7 @@ async function debugPlans(env, net, src) {
 
 /* ---------- ADMIN ONLY: plans with your real cost (used by admin > Data Prices) ---------- */
 async function adminPlans(request, env, network) {
-  const u = await authUser(request);
+  const u = await authUser(request, env);
   if (!u || String(u.email || "").toLowerCase() !== ADMIN_EMAIL.toLowerCase()) return json({ status: false, message: "Admin only." }, 403);
   if (!SERVICE_IDS[network]) return json({ status: false, message: "Unsupported network" }, 400);
   const s = await settings(env), lp = await listPlans(env, s, network);
